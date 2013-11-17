@@ -1,0 +1,196 @@
+<?php
+
+/**
+ * @file
+ * Description of the file goes here.
+ */
+
+/**
+ * Implements hook_entity_insert().
+ */
+function shadow_entity_entity_insert($entity, $type) {
+  // Avoid infinite recursivity
+  // This limits the automatic creation of entities to just one level of depth
+  if (isset($entity->is_shadow_entity)) {
+    return;
+  }
+
+  $info = entity_get_info($type);
+  $bundle = $entity->{$info['entity keys']['bundle']};
+
+  $configs = shadow_entity_get_config();
+  foreach ($configs as $config) {
+    if ($config->enabled &&
+      ($type == $config->source_type) &&
+      ($bundle == $config->source_bundle)) {
+
+      // If entity matches config source type and bundle, clone it
+      shadow_entity_clone_entity($entity, $config);
+    }
+  }
+}
+
+/**
+ * Implements hook_entity_delete().
+ */
+function shadow_entity_entity_delete($entity, $type) {
+  $info = entity_get_info($type);
+  $id_key = $info['entity keys']['id'];
+  $id = $entity->$id_key;
+
+  // Delete all entities created as shadow of this one
+  $results = db_select('shadow_entity', 'se')
+    ->fields('se')
+    ->condition('source_entity_type', $type)
+    ->condition('source_entity_id', $id)
+    ->execute()
+    ->fetchAllAssoc('id');
+  foreach ($results as $result) {
+    entity_delete($result->dest_entity_type, $result->dest_entity_id);
+  }
+
+  // Delete all records in which the entity is source
+  db_delete('shadow_entity')
+    ->condition('source_entity_type', $type)
+    ->condition('source_entity_id', $id)
+    ->execute();
+
+  // TODO: ?? Delete source entity when this entity is a destination
+  // make it an option
+
+  // Delete all records in which the entity is a destination
+  db_delete('shadow_entity')
+    ->condition('dest_entity_type', $type)
+    ->condition('dest_entity_id', $id)
+    ->execute();
+}
+
+/**
+ * Implements hook_entity_update().
+ */
+function shadow_entity_entity_update($entity, $type) {
+  $info = entity_get_info($type);
+
+  $id_key = $info['entity keys']['id'];
+  $label_key = $info['entity keys']['label'];
+
+  $id = $entity->$id_key;
+
+  // Delete all entities created as shadow of this one
+  $results = db_select('shadow_entity', 'se')
+    ->fields('se')
+    ->condition('source_entity_type', $type)
+    ->condition('source_entity_id', $id)
+    ->execute()
+    ->fetchAllAssoc('id');
+
+  foreach ($results as $result) {
+    // Load the destination entity
+    $dest_entities = entity_load($result->dest_entity_type, array($result->dest_entity_id));
+    if (!empty($dest_entities)) {
+      // Get the first returned entity, there should be only one
+      $dest_entity = reset($dest_entities);
+
+      $dest_info = entity_get_info($result->dest_entity_type);
+      $dest_label_key = $dest_info['entity keys']['label'];
+
+      // Update the label
+      $dest_entity->$dest_label_key = $entity->$label_key;
+
+      // Save the updated entity
+      entity_save($result->dest_entity_type, $dest_entity);
+    }
+  }
+}
+
+/**
+ * Return stored configs.
+ *
+ * @return mixed
+ */
+function shadow_entity_get_config() {
+
+  // TODO: Make this really fetch from db
+  // TODO: Use ctools to make configs exportable
+
+
+  // Hard wired
+
+  $configs = array(
+    'tag_to_node' => (object)array(
+      'enabled' => 1,
+      'source_type' => 'taxonomy_term',
+      'source_bundle' => 'tags',
+      'dest_type' => 'node',
+      'dest_bundle' => 'article',
+    ),
+  );
+
+  return $configs;
+}
+
+/**
+ * Clone an entity with the desired options.
+ *
+ * @param $entity
+ * @param $config
+ * @return stdClass
+ */
+function shadow_entity_clone_entity($entity, $config) {
+
+  // Fixme, get source type from the entity itself??
+  $src_info = entity_get_info($config->source_type);
+  $dest_info = entity_get_info($config->dest_type);
+
+  $src_label_key = $src_info['entity keys']['label'];
+  $dest_label_key = $dest_info['entity keys']['label'];
+  $dest_bundle_key = $dest_info['entity keys']['bundle'];
+
+  // Create the new entity
+  $values = array(
+    $dest_label_key => $entity->$src_label_key,
+    $dest_bundle_key => $config->dest_bundle,
+
+    // To avoid infinite recursivity
+    'is_shadow_entity' => TRUE,
+  );
+  $cloned_entity = entity_create($config->dest_type, $values);
+  entity_save($config->dest_type, $cloned_entity);
+
+  $src_id_key = $src_info['entity keys']['id'];
+  $src_id = $entity->$src_id_key;
+  $dest_id_key = $dest_info['entity keys']['id'];
+  $dest_id = $cloned_entity->$dest_id_key;
+
+  // Store the relationship info in our table
+  $shadow_values = array(
+    'source_entity_type' => $config->source_type,
+    'source_entity_id' => $src_id,
+    'dest_entity_type' => $config->dest_type,
+    'dest_entity_id' => $dest_id,
+  );
+  drupal_write_record('shadow_entity', $shadow_values);
+
+  return $cloned_entity;
+}
+
+/**
+ * Implements hook_menu().
+ */
+function shadow_entity_menu() {
+  $items = array();
+
+  // TODO: Implement an admin UI
+
+  return $items;
+}
+
+/**
+ * Implements hook_views_api().
+ */
+function shadow_entity_views_api() {
+  return array(
+    'api' => '3.0',
+    'path' => drupal_get_path('module', 'shadow_entity') . '/views',
+  );
+}
